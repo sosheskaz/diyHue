@@ -1,7 +1,6 @@
 import logManager
 import socket
-from time import sleep
-from zeroconf import IPVersion, ServiceBrowser, ServiceInfo, Zeroconf
+from zeroconf import IPVersion, ServiceInfo, Zeroconf
 
 logging = logManager.logger.get_logger(__name__)
 
@@ -17,10 +16,10 @@ def mdnsListener(ip, port, modelid, brigeid):
 
     info = ServiceInfo(
         "_hue._tcp.local.",
-        "DIYHue._hue._tcp.local.",
+        "DIYHue-" + brigeid[-6:] + "._hue._tcp.local.",
         addresses=[socket.inet_aton(ip)],
         port=port,
         properties=props,
-        server="DIYHue.local."
+        server="DIYHue-" + brigeid + ".local."
     )
     zeroconf.register_service(info) 

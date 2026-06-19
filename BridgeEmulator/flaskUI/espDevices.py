@@ -1,14 +1,13 @@
 import configManager
 import logManager
-import HueObjects
-import json
 from flask_restful import Resource
 from flask import request
 from functions.rules import rulesProcessor
-from sensors.discover import addHueMotionSensor, addHueSwitch
-from datetime import datetime
+from sensors.discover import addHueMotionSensor, addHueSwitch, addHueRotarySwitch
+from datetime import datetime, timezone
 from threading import Thread
 from time import sleep
+from functions.behavior_instance import checkBehaviorInstances
 
 logging = logManager.logger.get_logger(__name__)
 
@@ -49,6 +48,9 @@ class Switch(Resource):
                         sensor = addHueMotionSensor("Hue Motion Sensor", "native", {
                                                     "mac": mac, "threaded": False})
                         return {"success": "device registered"}
+                    elif args["devicetype"] == "ZLLRelativeRotary":
+                        sensor = addHueRotarySwitch({"mac": mac})
+                        return {"success": "device registered"}
                     else:
                         return {"fail": "unknown device"}
                 else:
@@ -88,16 +90,27 @@ class Switch(Resource):
                                     obj.dxState["temperature"] = current_time
                             elif obj.type in ["ZLLSwitch", "ZGPSwitch"]:
                                 if "button" in args:
-                                    obj.state["buttonevent"] = int(args["button"])
+                                    obj.update_attr({"state":{"buttonevent":int(args["button"])}})
+                                    #obj.state["buttonevent"] = int(args["button"])
                                     obj.dxState["buttonevent"] = current_time
+                                if "battery" in args:
+                                    obj.update_attr({"config":{"battery":int(args["battery"])}})
+                                    #obj.config["battery"] = int(args["battery"])
+                            elif obj.type == "ZLLRelativeRotary":
+                                if "rotary" in args:
+                                    obj.state["rotaryevent"] = int(args["rotary"])
+                                    obj.state["expectedrotation"] = int(args["rotation"])
+                                    obj.state["expectedeventduration"] = int(args["duration"])
+                                    obj.dxState["rotaryevent"] = current_time
                                 if "battery" in args:
                                     obj.config["battery"] = int(args["battery"])
                             else:
                                 result = {"fail": "unknown device"}
                             obj.dxState["lastupdated"] = current_time
-                            obj.state["lastupdated"] = datetime.utcnow().strftime(
-                                "%Y-%m-%dT%H:%M:%S")
+                            obj.state["lastupdated"] = datetime.now(timezone.utc).strftime(
+                                "%Y-%m-%dT%H:%M:%S.000Z")
                             rulesProcessor(obj, current_time)
+                            checkBehaviorInstances(obj)
                             result = {"success": "command applied"}
                         else:
                             if result == {""} or result == {"fail": "no mac in list"}:

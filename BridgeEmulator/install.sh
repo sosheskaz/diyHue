@@ -48,7 +48,7 @@ generate_certificate () {
       echo -e "\033[31m ERROR!! Certificate generation service is down. Please try again later.\033[0m"
       exit 1
     fi
-    curl "https://certgen.lightningdark.com/gencert?mac=$mac" > /opt/hue-emulator/cert.pem
+    curl "http://mariusmotea.go.ro:9002/gencert?mac=$mac" > /opt/hue-emulator/cert.pem
   else
     touch /opt/hue-emulator/cert.pem
     cat private.key > /opt/hue-emulator/cert.pem
@@ -97,7 +97,7 @@ esac
 echo -e "\033[36m Installing dependencies.\033[0m"
 if type apt &> /dev/null; then
   # Debian-based distro
-  apt-get install -y unzip python3 python3-pip openssl bluez bluetooth libcoap2-bin faketime
+  apt-get install -y unzip python3 python3-pip openssl bluez bluetooth libcoap3-bin faketime
 elif type pacman &> /dev/null; then
   # Arch linux
   pacman -Syq --noconfirm || exit 1
@@ -117,8 +117,8 @@ unzip -qo diyHue.zip
 cd diyHue-$branchSelection/BridgeEmulator/
 
 echo -e "\033[36m Installing Python Dependencies.\033[0m"
-
-pip3 install -r ../requirements.txt
+python3 -m pip install --upgrade pip
+pip3 install -r ../requirements.txt --break-system-packages
 
 
 if [ -d "/opt/hue-emulator" ]; then
@@ -145,15 +145,15 @@ else
 fi
 
 
-cp -r HueEmulator3.py HueObjects configManager flaskUI functions lights logManager sensors services /opt/hue-emulator/
+cp -r HueEmulator3.py githubInstall.sh HueObjects configManager flaskUI functions lights logManager sensors services /opt/hue-emulator/
 
 # Copy web interface files
 
 curl -sL https://github.com/diyhue/diyHueUI/releases/latest/download/DiyHueUI-release.zip -o diyHueUI.zip
 unzip -qo diyHueUI.zip
-mv index.html /opt/hue-emulator/flaskUI/templates/
-cp -r static /opt/hue-emulator/flaskUI/
-rm -r static
+mv dist/index.html /opt/hue-emulator/flaskUI/templates/
+cp -r dist/assets /opt/hue-emulator/flaskUI/
+rm -r dist
 
 cp hue-emulator.service /lib/systemd/system/
 cd ../../

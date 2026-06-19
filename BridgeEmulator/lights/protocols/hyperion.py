@@ -1,6 +1,5 @@
 import json
 import logManager
-import random
 import re
 import socket
 from functions.colors import convert_rgb_xy, convert_xy, hsv_to_rgb
@@ -90,7 +89,7 @@ def get_light_state(light):
         response = c.recv(1024 * 1024).decode('utf-8').split("\r\n")
         for data in response:
             info = json.loads(data)
-            if "success" in info and info["success"] == True and len(info["info"]["priorities"]) >= 0:
+            if "success" in info and info["success"] == True and len(info["info"]["priorities"]) > 0:
                 activeColor = info["info"]["priorities"][0]
                 if activeColor["priority"] == PRIORITY:
                     rgb = activeColor["value"]["RGB"]

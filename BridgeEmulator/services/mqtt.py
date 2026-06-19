@@ -4,9 +4,9 @@ import json
 import math
 import weakref
 import ssl
-import HueObjects
+from HueObjects import Sensor
 import paho.mqtt.client as mqtt
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Thread
 from time import sleep
 from functions.core import nextFreeId
@@ -14,6 +14,8 @@ from sensors.discover import addHueMotionSensor
 from sensors.sensor_types import sensorTypes
 from lights.discover import addNewLight
 from functions.rules import rulesProcessor
+from functions.behavior_instance import checkBehaviorInstances
+import requests
 
 logging = logManager.logger.get_logger(__name__)
 bridgeConfig = configManager.bridgeConfig.yaml_config
@@ -132,6 +134,9 @@ standardSensors = {
     "RDM002": {
         "dataConversion": {
             "rootKey": "action",
+            "dirKey": "action_direction",
+            "typeKey": "action_type",
+            "timeKey": "action_time",
             "button_1_press": {"buttonevent": 1000},
             "button_1_hold": {"buttonevent": 1001},
             "button_1_press_release": {"buttonevent": 1002},
@@ -154,6 +159,26 @@ standardSensors = {
             "dial_rotate_right_step": {"rotaryevent": 1},
             "dial_rotate_right_slow": {"rotaryevent": 2},
             "dial_rotate_right_fast": {"rotaryevent": 2},
+            "expectedrotation":90,
+            "expectedeventduration":400
+        }
+    },
+    "PTM 215Z": {
+        "dataConversion": {
+            "rootKey": "action",
+            "press_1": {"buttonevent": 1000},
+            "release_1": {"buttonevent": 1002},
+            "press_2": {"buttonevent": 2000},
+            "release_2": {"buttonevent": 2002},
+            "press_3": {"buttonevent": 3000},
+            "release_3": {"buttonevent": 3002},
+            "press_4": {"buttonevent": 4000},
+            "release_4": {"buttonevent": 4002},
+            "press_1_and_3": {"buttonevent": 1010},
+            "release_1_and_3": {"buttonevent": 1003},
+            "press_2_and_4": {"buttonevent": 2010},
+            "release_2_and_4": {"buttonevent": 2003},
+            "press_energy_bar": {"buttonevent": 5000},
         }
     },
 }
@@ -182,6 +207,7 @@ def longPressButton(sensor, buttonevent):
         current_time =  datetime.now()
         sensor.dxState["lastupdated"] = current_time
         rulesProcessor(sensor, current_time)
+        checkBehaviorInstances(sensor)
         sleep(0.5)
     return
 
@@ -219,7 +245,7 @@ def on_autodiscovery_light(msg):
     data = json.loads(msg.payload)
     logging.info("Auto discovery message on: " + msg.topic)
     #logging.debug(json.dumps(data, indent=4))
-    discoveredDevices[data['unique_id']] = data;
+    discoveredDevices[data['unique_id']] = data
     for key, data in discoveredDevices.items():
         device_new = True
         for light, obj in bridgeConfig["lights"].items():
@@ -235,14 +261,16 @@ def on_autodiscovery_light(msg):
 
             # Device capabilities
             keys = data.keys()
-            light_color = "xy" in keys and data["xy"] == True
+            light_xy = "xy" in keys and data["xy"] == True
             light_brightness = "brightness" in keys and data["brightness"] == True
             light_ct = "color_temp" in keys and data["color_temp"] == True
 
             modelid = None
-            if light_color and light_ct:
+            if light_xy and light_ct:
                 modelid = "LCT015"
-            elif light_color: # Every light as LCT001? Or also support other lights
+            elif light_xy and not light_ct:
+                modelid = "LLC010"
+            elif light_xy: # Every light as LCT001? Or also support other lights
                 modelid = "LCT001"
             elif light_ct:
                 modelid = "LTW001"
@@ -282,11 +310,12 @@ def on_message(client, userdata, msg):
                         if getObject(key["friendly_name"]) == False: ## Add the new sensor
                             logging.info("MQTT: Add new mqtt sensor " + key["friendly_name"])
                             if key["model_id"] in standardSensors:
-                                new_sensor_id = nextFreeId(bridgeConfig, "sensors")
-                                sensor_type = list(sensorTypes[key["model_id"]].keys())[0]
-                                uniqueid = convertHexToMac(key["ieee_address"]) + "-01-1000"
-                                sensorData = {"name": key["friendly_name"], "protocol": "mqtt", "modelid": key["model_id"], "type": sensor_type, "uniqueid": uniqueid,"protocol_cfg": {"friendly_name": key["friendly_name"], "ieeeAddr": key["ieee_address"], "model": key["definition"]["model"]}, "id_v1": new_sensor_id}
-                                bridgeConfig["sensors"][new_sensor_id] = HueObjects.Sensor(sensorData)
+                                for sensor_type in sensorTypes[key["model_id"]].keys():
+                                    new_sensor_id = nextFreeId(bridgeConfig, "sensors")
+                                    #sensor_type = sensorTypes[key["model_id"]][sensor]
+                                    uniqueid = convertHexToMac(key["ieee_address"]) + "-01-1000"
+                                    sensorData = {"name": key["friendly_name"], "protocol": "mqtt", "modelid": key["model_id"], "type": sensor_type, "uniqueid": uniqueid,"protocol_cfg": {"friendly_name": key["friendly_name"], "ieeeAddr": key["ieee_address"], "model": key["definition"]["model"]}, "id_v1": new_sensor_id}
+                                    bridgeConfig["sensors"][new_sensor_id] = Sensor.Sensor(sensorData)
                             ### TRADFRI Motion Sensor, Xiaomi motion sensor, etc
                             elif key["model_id"] in motionSensors:
                                     logging.info("MQTT: add new motion sensor " + key["model_id"])
@@ -313,17 +342,17 @@ def on_message(client, userdata, msg):
                             device.config["battery"] = data["battery"]
                         if device.config["on"] == False:
                             return
-                        convertedPayload = {"lastupdated": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")}
+                        convertedPayload = {"lastupdated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")}
                         if ("action" in data and data["action"] == "") or ("click" in data and data["click"] == ""):
                             return
                         ### If is a motion sensor update the light level and temperature
                         if device.modelid in motionSensors:
                             convertedPayload["presence"] = data["occupancy"]
-                            lightPayload = {"lastupdated": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")}
+                            lightPayload = {"lastupdated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")}
                             lightSensor = findLightSensor(device)
                             if "temperature" in data:
                                 tempSensor = findTempSensor(device)
-                                tempSensor.state = {"temperature": int(data["temperature"] * 100), "lastupdated": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")}
+                                tempSensor.state = {"temperature": int(data["temperature"] * 100), "lastupdated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")}
                             if "illuminance_lux" in data:
                                 hue_lightlevel = int(10000 * math.log10(data["illuminance_lux"])) if data["illuminance_lux"] != 0 else 0
                                 if hue_lightlevel > lightSensor.config["tholddark"]:
@@ -359,6 +388,7 @@ def on_message(client, userdata, msg):
                         if "buttonevent" in  convertedPayload and convertedPayload["buttonevent"] in [1001, 2001, 3001, 4001, 5001]:
                             Thread(target=longPressButton, args=[device, convertedPayload["buttonevent"]]).start()
                         rulesProcessor(device, current_time)
+                        checkBehaviorInstances(device)
                     elif device.getObjectPath()["resource"] == "lights":
                         state = {"reachable": True}
                         v2State = {}
@@ -412,7 +442,7 @@ def on_connect(client, userdata, flags, rc):
 
 def mqttServer():
 
-    logging.info("Strting MQTT service...")
+    logging.info("Starting MQTT service...")
     # ================= MQTT CLIENT Connection========================
     # Set user/password on client if supplied
 

@@ -1,7 +1,6 @@
 import logManager
 import json
 import time
-import random
 import threading
 from ws4py.client.threadedclient import WebSocketClient
 
@@ -109,13 +108,18 @@ class HomeAssistantClient(WebSocketClient):
     def change_light(self, light, data):
         service_data = {}
         service_data['entity_id'] = light.protocol_cfg['entity_id']
-
-        payload = {
-            "type": "call_service",
-            "domain": "light",
-            "service_data": service_data
-        }
-
+        if light.protocol_cfg['entity_id'].startswith("light."):
+            payload = {
+                "type": "call_service",
+                "domain": "light",
+                "service_data": service_data
+            }
+        elif light.protocol_cfg['entity_id'].startswith("switch."):
+            payload = {
+                "type": "call_service",
+                "domain": "switch",
+                "service_data": service_data
+            }
         payload["service"] = "turn_on"
         if 'on' in data:
             if not data['on']:
@@ -124,7 +128,7 @@ class HomeAssistantClient(WebSocketClient):
         color_from_hsv = False
         for key, value in data.items():
             if key == "ct":
-                service_data['color_temp'] = value
+                service_data['color_temp_kelvin'] = 1000000 / value
             if key == "bri":
                 service_data['brightness'] = value
             if key == "xy":
@@ -183,7 +187,7 @@ class HomeAssistantClient(WebSocketClient):
         should_include = False
         diy_hue_flag = None
         entity_id = ha_state.get('entity_id', None)
-        if entity_id.startswith("light."):
+        if entity_id.startswith("light.") or entity_id.startswith("switch."):
             if 'attributes' in ha_state and 'diyhue' in ha_state['attributes']:
                 diy_hue_flag = ha_state['attributes']['diyhue']
 
@@ -292,14 +296,19 @@ def discover(detectedLights):
         supported_colourmodes = ha_state.get('attributes', {}).get('supported_color_modes', [])
 
         model_id = None
-        if HS in supported_colourmodes or XY in supported_colourmodes or RGB in supported_colourmodes or RGBW in supported_colourmodes or RGBWW in supported_colourmodes:
+        if HS in supported_colourmodes or XY in supported_colourmodes or RGB in supported_colourmodes or RGBW in supported_colourmodes or RGBWW in supported_colourmodes and COLOR_TEMP in supported_colourmodes:
             model_id = "LCT015"
         elif COLOR_TEMP in supported_colourmodes:
             model_id = "LTW001"
+        elif XY in supported_colourmodes:
+            model_id = "LLC010"
         elif BRIGHTNESS in supported_colourmodes:
             model_id = "LWB010"
-        else:
+        elif ONOFF in supported_colourmodes and not BRIGHTNESS in supported_colourmodes:
             model_id = "LOM001"
+        else:
+            logging.info("unknown model id " + str(supported_colourmodes))
+            continue
 
         protocol_cfg = {"entity_id": entity_id,
                         "ip": "none"}

@@ -1,6 +1,5 @@
-#!/usr/bin/python3
+#!/usr/bin/env python
 from flask import Flask
-from flask.json import jsonify
 from flask_cors import CORS
 from flask_restful import Api
 from threading import Thread
@@ -12,16 +11,15 @@ from flaskUI.core import User #dummy import for flaks_login module
 from flaskUI.restful import NewUser, ShortConfig, EntireConfig, ResourceElements, Element, ElementParam, ElementParamId
 from flaskUI.v2restapi import AuthV1, ClipV2, ClipV2Resource, ClipV2ResourceId
 from flaskUI.espDevices import Switch
-from flaskUI.error_pages.handlers import error_pages
+from flaskUI.Credits import Credits
 from werkzeug.serving import WSGIRequestHandler
 from functions.daylightSensor import daylightSensor
-from pprint import pprint
 
 bridgeConfig = configManager.bridgeConfig.yaml_config
 logging = logManager.logger.get_logger(__name__)
 _ = logManager.logger.get_logger("werkzeug")
 WSGIRequestHandler.protocol_version = "HTTP/1.1"
-app = Flask(__name__, template_folder='flaskUI/templates',static_url_path="/static", static_folder='flaskUI/static')
+app = Flask(__name__, template_folder='flaskUI/templates',static_url_path="/assets", static_folder='flaskUI/assets')
 api = Api(app)
 cors = CORS(app, resources={r"*": {"origins": "*"}})
 
@@ -34,7 +32,6 @@ login_manager.init_app(app)
 # Tell users what view to go to when they need to login.
 login_manager.login_view = "core.login"
 
-
 @login_manager.user_loader
 def user_loader(email):
     if email not in bridgeConfig["config"]["users"]:
@@ -43,7 +40,6 @@ def user_loader(email):
     user = User()
     user.id = email
     return user
-
 
 @login_manager.request_loader
 def request_loader(request):
@@ -61,6 +57,8 @@ def request_loader(request):
 
     return user
 
+### Licence/credits
+api.add_resource(Credits, '/licenses/<string:resource>', strict_slashes=False)
 ### ESP devices
 api.add_resource(Switch, '/switch')
 ### HUE API
@@ -101,8 +99,8 @@ def runHttps(BIND_IP, HOST_HTTPS_PORT, CONFIG_PATH):
 def runHttp(BIND_IP, HOST_HTTP_PORT):
     app.run(host=BIND_IP, port=HOST_HTTP_PORT)
 
-if __name__ == '__main__':
-    from services import mqtt, deconz, ssdp, mdns, scheduler, remoteApi, remoteDiscover, entertainment, stateFetch, eventStreamer, homeAssistantWS
+def main():
+    from services import mqtt, deconz, ssdp, mdns, scheduler, remoteApi, remoteDiscover, entertainment, stateFetch, eventStreamer, homeAssistantWS, updateManager
     ### variables initialization
     BIND_IP = configManager.runtimeConfig.arg["BIND_IP"]
     HOST_IP = configManager.runtimeConfig.arg["HOST_IP"]
@@ -111,6 +109,7 @@ if __name__ == '__main__':
     HOST_HTTPS_PORT = configManager.runtimeConfig.arg["HTTPS_PORT"]
     CONFIG_PATH = configManager.runtimeConfig.arg["CONFIG_PATH"]
     DISABLE_HTTPS = configManager.runtimeConfig.arg["noServeHttps"]
+    updateManager.startupCheck()
 
     Thread(target=daylightSensor, args=[bridgeConfig["config"]["timezone"], bridgeConfig["sensors"]["1"]]).start()
     ### start services
@@ -132,3 +131,6 @@ if __name__ == '__main__':
     if not DISABLE_HTTPS:
         Thread(target=runHttps, args=[BIND_IP, HOST_HTTPS_PORT, CONFIG_PATH]).start()
     runHttp(BIND_IP, HOST_HTTP_PORT)
+
+if __name__ == '__main__':
+    main()
