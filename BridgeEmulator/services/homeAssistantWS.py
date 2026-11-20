@@ -8,12 +8,15 @@ logging = logManager.logger.get_logger(__name__)
 
 
 discovery_timeout_seconds = 60
+auth_timeout_seconds = 10
 discovery_result = threading.Event()
 next_connection_error_log = 0
 logging_backoff = 2  # 2 Second back off
 homeassistant_token = ''
 homeassistant_url = 'ws://127.0.0.1:8123/api/websocket'
 homeassistant_ws_client = None
+event_session = None
+reconfiguration_lock = threading.RLock()
 include_by_default = False
 use_https = False
 
@@ -45,12 +48,19 @@ class HomeAssistantClient(WebSocketClient):
     message_id = 1
     id_to_type = {}
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Home Assistant rejects anything but the auth message until it has
+        # answered auth_ok, so commands have to wait for this.
+        self.authenticated = threading.Event()
+
     def opened(self):
         logging.info("Home Assistant WebSocket Connection Opened")
 
     def closed(self, code, reason=None):
         logging.info(
             "Home Assistant WebSocket Connection Closed. Code: {} Reason {}".format(code, reason))
+        self.authenticated.clear()
         for home_assistant_state in latest_states.values():
             if 'state' in home_assistant_state:
                 home_assistant_state['state'] = 'unavailable'
@@ -72,7 +82,7 @@ class HomeAssistantClient(WebSocketClient):
         elif message.get('type', None) == "pong":
             self.do_pong(message)
         else:
-            logging.warning("Unexpected message: ", message)
+            logging.warning("Unexpected message: %s", message)
 
     def do_auth_required(self, m):
         logging.info("Home Assistant Web Socket Authorisation required")
@@ -88,6 +98,7 @@ class HomeAssistantClient(WebSocketClient):
 
     def do_auth_complete(self):
         logging.info("Home Assistant Web Socket Authorisation complete")
+        self.authenticated.set()
         self.get_all_lights()
         self.subscribe_for_updates()
 
@@ -148,7 +159,11 @@ class HomeAssistantClient(WebSocketClient):
                 service_data['transition'] = value / 10
 
         if color_from_hsv:
-            service_data['hs_color'] = [data['hue'], data['sat']]
+            # Hue uses hue 0-65535 and sat 0-254; Home Assistant's hs_color is
+            # [0-360, 0-100]. A request can carry only one of the two.
+            hue = data.get('hue', light.state.get('hue', 0))
+            sat = data.get('sat', light.state.get('sat', 0))
+            service_data['hs_color'] = [round(hue * 360 / 65535, 2), round(sat * 100 / 254, 2)]
 
         self._send_with_id(payload, "service")
 
@@ -215,11 +230,35 @@ class HomeAssistantClient(WebSocketClient):
         self.send(json_payload)
 
 
+def reflection_enabled():
+    return event_session is not None
+
+
+class MappingUnavailable(ValueError):
+    pass
+
+
+def assert_command_allowed(light):
+    if event_session is not None and not event_session.reducer.command_allowed(light):
+        raise MappingUnavailable("HA mapping is not authoritative")
+
+
 def connect_if_required():
+    if event_session is not None:
+        assert event_session.client is not None, "HA session unavailable"
+        return event_session.client
     if homeassistant_ws_client is None or homeassistant_ws_client.client_terminated:
         create_websocket_client()
 
     return homeassistant_ws_client
+
+
+def connect_and_authenticate():
+    """Return a connected client once Home Assistant has accepted its token, or None."""
+    client = connect_if_required()
+    if client is None or not client.authenticated.wait(timeout=auth_timeout_seconds):
+        return None
+    return client
 
 
 def create_websocket_client():
@@ -243,7 +282,48 @@ def create_websocket_client():
         homeassistant_ws_client = None
 
 
+def disable_event_session(owner):
+    global event_session, homeassistant_ws_client
+    with reconfiguration_lock:
+        if event_session is owner:
+            owner.retire()
+            event_session = None
+            homeassistant_ws_client = None
+            create_ws_client(owner.bridge)
+
+
 def create_ws_client(bridgeConfig):
+    with reconfiguration_lock:
+        return _create_ws_client(bridgeConfig)
+
+
+def _create_ws_client(bridgeConfig):
+    global event_session, homeassistant_ws_client
+    if event_session is not None:
+        previous = event_session
+        previous.retire()
+        event_session = None
+    cfg = bridgeConfig["config"]["homeassistant"]
+    if cfg.get("homeAssistantEventReflection", False):
+        previous_legacy, homeassistant_ws_client = homeassistant_ws_client, None
+        if previous_legacy is not None:
+            # Close the transport first so a legacy close-frame write cannot block.
+            previous_legacy.close_connection()
+            try:
+                previous_legacy.close()
+            except Exception:
+                pass
+        from services.haEventClient import EventSession, make_client_class
+        def included(row):
+            if row is None or not row.get('entity_id', '').startswith(('light.', 'switch.')):
+                return False
+            flag = row.get('attributes', {}).get('diyhue')
+            current_cfg = bridgeConfig['config']['homeassistant']
+            return flag != 'exclude' if current_cfg.get('homeAssistantIncludeByDefault', False) else flag == 'include'
+        event_session = EventSession(bridgeConfig, make_client_class(HomeAssistantClient), included)
+        event_session.settings()
+        event_session.start()
+        return
     global homeassistant_token
     global homeassistant_url
     global include_by_default
@@ -268,15 +348,23 @@ def create_ws_client(bridgeConfig):
 
 def discover(detectedLights):
     logging.info("HomeAssistant WebSocket discovery called")
-    connect_if_required()
-    homeassistant_ws_client.get_all_lights()
+    client = connect_and_authenticate()
+    if client is None:
+        logging.warning("HomeAssistant WebSocket discovery skipped, not connected or not authorised")
+        return
+    client.get_all_lights()
     logging.info("HomeAssistant WebSocket discovery waiting for devices")
-    completed = discovery_result.wait(timeout=discovery_timeout_seconds)
+    completed = (event_session.reducer.ready if event_session is not None else
+                 discovery_result.wait(timeout=discovery_timeout_seconds))
     logging.info("HomeAssistant WebSocket discovery devices received, timeout? {}".format(
         (not completed)))
     # This only loops over discovered devices so we have already filtered out what we don't want
-    for entity_id in latest_states.keys():
-        ha_state = latest_states[entity_id]
+    states = latest_states
+    if event_session is not None:
+        with event_session.reducer.lock:
+            states = dict(event_session.reducer.rows)
+    for entity_id in states.keys():
+        ha_state = states[entity_id]
         device_new = True
         lightName = ha_state["attributes"]["friendly_name"] if "friendly_name" in ha_state["attributes"] else entity_id
 
